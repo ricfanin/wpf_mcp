@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:devblogs.microsoft.com)",
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:www.npmjs.com)",
+      "WebFetch(domain:portkey.ai)",
+      "WebFetch(domain:www.zstack-cloud.com)"
+    ]
+  }
+}
