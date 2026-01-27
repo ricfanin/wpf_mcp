@@ -1,4 +1,6 @@
 using FlaUI.Core.AutomationElements;
+using FlaUI.UIA3;
+using WpfMcp.Server.Models;
 
 namespace WpfMcp.Server.Services;
 
@@ -7,6 +9,11 @@ namespace WpfMcp.Server.Services;
 /// </summary>
 public interface IApplicationManager
 {
+    /// <summary>
+    /// The UIA3 automation instance used for element operations.
+    /// </summary>
+    UIA3Automation Automation { get; }
+
     /// <summary>
     /// Whether an application is currently attached.
     /// </summary>
@@ -55,4 +62,9 @@ public interface IApplicationManager
     /// Checks if the attached application has crashed.
     /// </summary>
     bool HasApplicationCrashed();
+
+    /// <summary>
+    /// Gets captured console output from the launched application.
+    /// </summary>
+    IReadOnlyList<ConsoleMessage> GetConsoleOutput(string? level = null, int? limit = null);
 }

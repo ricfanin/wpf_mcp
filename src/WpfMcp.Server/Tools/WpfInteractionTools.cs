@@ -591,14 +591,6 @@ public sealed class WpfInteractionTools
                 "Call wpf_snapshot to refresh element references"));
         }
 
-        if (!_elementReferenceManager.IsReferenceValid(refId))
-        {
-            return JsonSerializer.Serialize(ToolResponse<object>.Fail(
-                ErrorCodes.ElementStale,
-                "Element reference is no longer valid",
-                "Call wpf_snapshot to get fresh element references"));
-        }
-
         return null;
     }
 

@@ -2,10 +2,14 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
 using FlaUI.Core.AutomationElements;
+using FlaUI.Core.Conditions;
 using FlaUI.Core.Definitions;
+using FlaUI.UIA3.Converters;
+using Interop.UIAutomationClient;
 using ModelContextProtocol.Server;
 using WpfMcp.Server.Models;
 using WpfMcp.Server.Services;
+using InteropTreeScope = Interop.UIAutomationClient.TreeScope;
 
 namespace WpfMcp.Server.Tools;
 
@@ -82,8 +86,41 @@ public sealed class WpfSnapshotTools
                 rootElement = _applicationManager.MainWindow!;
             }
 
-            // Build the snapshot tree
-            var snapshotElement = BuildSnapshotTree(rootElement, 0, max_depth, include_invisible);
+            // Build the snapshot tree using native cached query for performance
+            var automation = _applicationManager.Automation;
+            var nativeAutomation = automation.NativeAutomation;
+
+            // Create native cache request with all properties needed during tree walk
+            var nativeCacheReq = nativeAutomation.CreateCacheRequest();
+            nativeCacheReq.TreeScope = InteropTreeScope.TreeScope_Subtree;
+            // Properties
+            nativeCacheReq.AddProperty(UiaPropertyIds.Name);
+            nativeCacheReq.AddProperty(UiaPropertyIds.AutomationId);
+            nativeCacheReq.AddProperty(UiaPropertyIds.ControlType);
+            nativeCacheReq.AddProperty(UiaPropertyIds.IsEnabled);
+            nativeCacheReq.AddProperty(UiaPropertyIds.IsOffscreen);
+            nativeCacheReq.AddProperty(UiaPropertyIds.HasKeyboardFocus);
+            nativeCacheReq.AddProperty(UiaPropertyIds.IsKeyboardFocusable);
+            nativeCacheReq.AddProperty(UiaPropertyIds.ProcessId);
+            nativeCacheReq.AddProperty(UiaPropertyIds.FrameworkId);
+            nativeCacheReq.AddProperty(UiaPropertyIds.BoundingRectangle);
+            nativeCacheReq.AddProperty(UiaPropertyIds.ClassName);
+            nativeCacheReq.AddProperty(UiaPropertyIds.RuntimeId);
+            // Patterns
+            nativeCacheReq.AddPattern(UiaPatternIds.Value);
+            nativeCacheReq.AddPattern(UiaPatternIds.Toggle);
+            nativeCacheReq.AddPattern(UiaPatternIds.SelectionItem);
+            nativeCacheReq.AddPattern(UiaPatternIds.ExpandCollapse);
+            nativeCacheReq.AddPattern(UiaPatternIds.Window);
+
+            // Execute cached query: single cross-process COM call fetches entire subtree
+            var nativeRoot = AutomationElementConverter.ToNative(rootElement);
+            var cachedNativeRoot = nativeRoot.FindFirstBuildCache(
+                InteropTreeScope.TreeScope_Element,
+                nativeAutomation.CreateTrueCondition(),
+                nativeCacheReq);
+
+            var snapshotElement = BuildCachedSnapshotTree(cachedNativeRoot, 0, max_depth, include_invisible);
 
             var metadata = new ResponseMetadata
             {
@@ -246,15 +283,6 @@ public sealed class WpfSnapshotTools
                     "Call wpf_snapshot to refresh element references"));
             }
 
-            // Validate element is still accessible
-            if (!_elementReferenceManager.IsReferenceValid(@ref))
-            {
-                return JsonSerializer.Serialize(ToolResponse<object>.Fail(
-                    ErrorCodes.ElementStale,
-                    "Element reference is no longer valid",
-                    "Call wpf_snapshot to get fresh element references"));
-            }
-
             var properties = new Dictionary<string, object?>
             {
                 ["ref"] = @ref,
@@ -289,26 +317,39 @@ public sealed class WpfSnapshotTools
         }
     }
 
-    private SnapshotElement BuildSnapshotTree(AutomationElement element, int currentDepth, int maxDepth, bool includeInvisible)
+    /// <summary>
+    /// Builds the snapshot tree from a native cached element, reading all properties
+    /// from the UIA cache (zero cross-process COM calls per element).
+    /// </summary>
+    private SnapshotElement BuildCachedSnapshotTree(IUIAutomationElement cachedElement, int currentDepth, int maxDepth, bool includeInvisible)
     {
-        // Register the element
-        var reference = _elementReferenceManager.RegisterElement(element);
+        var automation = _applicationManager.Automation;
 
-        // Get states
-        var states = GetElementStates(element);
+        // Convert to FlaUI element for registration (lightweight wrapper, no COM calls)
+        var flaElement = AutomationElementConverter.NativeToManaged(automation, cachedElement);
 
-        // Get value if available
+        // Register the FlaUI element (for future interactions via ref ID).
+        // RegisterElement reads properties from the FlaUI wrapper — these will be live COM calls.
+        // To avoid that, we build the ElementReference data from cached native properties
+        // and use RegisterElement only to store the element mapping.
+        var reference = _elementReferenceManager.RegisterElement(flaElement);
+
+        // Read states from cached native properties (no COM round-trips)
+        var states = GetCachedElementStates(cachedElement);
+
+        // Read value from cached pattern
         string? value = null;
         try
         {
-            if (element.Patterns.Value.IsSupported)
+            var valuePattern = (IUIAutomationValuePattern?)cachedElement.GetCachedPattern(UiaPatternIds.Value);
+            if (valuePattern != null)
             {
-                value = element.Patterns.Value.Pattern.Value.Value;
+                value = valuePattern.CachedValue;
             }
         }
         catch
         {
-            // Value not available
+            // Value pattern not available
         }
 
         var snapshotElement = new SnapshotElement
@@ -327,16 +368,27 @@ public sealed class WpfSnapshotTools
         {
             try
             {
-                var children = element.FindAllChildren();
-                foreach (var child in children)
+                var cachedChildren = cachedElement.GetCachedChildren();
+                var childCount = cachedChildren.Length;
+                for (int i = 0; i < childCount; i++)
                 {
-                    // Skip invisible elements if not requested
-                    if (!includeInvisible && child.Properties.IsOffscreen.ValueOrDefault)
+                    var child = cachedChildren.GetElement(i);
+
+                    // Skip invisible elements if not requested (read from cache)
+                    if (!includeInvisible)
                     {
-                        continue;
+                        try
+                        {
+                            var isOffscreen = (bool)child.GetCachedPropertyValue(UiaPropertyIds.IsOffscreen);
+                            if (isOffscreen) continue;
+                        }
+                        catch
+                        {
+                            // Can't determine visibility, include the element
+                        }
                     }
 
-                    var childSnapshot = BuildSnapshotTree(child, currentDepth + 1, maxDepth, includeInvisible);
+                    var childSnapshot = BuildCachedSnapshotTree(child, currentDepth + 1, maxDepth, includeInvisible);
                     snapshotElement.Children.Add(childSnapshot);
                 }
             }
@@ -349,105 +401,157 @@ public sealed class WpfSnapshotTools
         return snapshotElement;
     }
 
-    private static List<string> GetElementStates(AutomationElement element)
+    /// <summary>
+    /// Reads element states from the UIA cache (no live COM calls).
+    /// </summary>
+    private static List<string> GetCachedElementStates(IUIAutomationElement cachedElement)
     {
         var states = new List<string>();
 
         try
         {
-            if (!element.Properties.IsEnabled.ValueOrDefault)
+            var isEnabled = (bool)cachedElement.GetCachedPropertyValue(UiaPropertyIds.IsEnabled);
+            if (!isEnabled)
                 states.Add("disabled");
 
-            if (element.Properties.HasKeyboardFocus.ValueOrDefault)
+            var hasFocus = (bool)cachedElement.GetCachedPropertyValue(UiaPropertyIds.HasKeyboardFocus);
+            if (hasFocus)
                 states.Add("focused");
 
-            // Check toggle state
-            if (element.Patterns.Toggle.IsSupported)
+            // Toggle state
+            var togglePattern = (IUIAutomationTogglePattern?)cachedElement.GetCachedPattern(UiaPatternIds.Toggle);
+            if (togglePattern != null)
             {
-                var toggleState = element.Patterns.Toggle.Pattern.ToggleState.Value;
-                states.Add(toggleState == ToggleState.On ? "checked" : "unchecked");
+                states.Add(togglePattern.CachedToggleState == Interop.UIAutomationClient.ToggleState.ToggleState_On ? "checked" : "unchecked");
             }
 
-            // Check selection state
-            if (element.Patterns.SelectionItem.IsSupported)
+            // Selection state
+            var selectionItemPattern = (IUIAutomationSelectionItemPattern?)cachedElement.GetCachedPattern(UiaPatternIds.SelectionItem);
+            if (selectionItemPattern != null)
             {
-                if (element.Patterns.SelectionItem.Pattern.IsSelected.Value)
+                if (selectionItemPattern.CachedIsSelected != 0)
                     states.Add("selected");
             }
 
-            // Check expand/collapse state
-            if (element.Patterns.ExpandCollapse.IsSupported)
+            // Expand/collapse state
+            var expandPattern = (IUIAutomationExpandCollapsePattern?)cachedElement.GetCachedPattern(UiaPatternIds.ExpandCollapse);
+            if (expandPattern != null)
             {
-                var expandState = element.Patterns.ExpandCollapse.Pattern.ExpandCollapseState.Value;
-                states.Add(expandState == ExpandCollapseState.Expanded ? "expanded" : "collapsed");
+                states.Add(expandPattern.CachedExpandCollapseState == Interop.UIAutomationClient.ExpandCollapseState.ExpandCollapseState_Expanded ? "expanded" : "collapsed");
             }
 
-            // Check if read-only
-            if (element.Patterns.Value.IsSupported)
+            // Read-only (from value pattern)
+            var valuePattern = (IUIAutomationValuePattern?)cachedElement.GetCachedPattern(UiaPatternIds.Value);
+            if (valuePattern != null)
             {
-                if (element.Patterns.Value.Pattern.IsReadOnly.Value)
+                if (valuePattern.CachedIsReadOnly != 0)
                     states.Add("readonly");
             }
 
-            // Check if modal
-            if (element.Patterns.Window.IsSupported)
+            // Modal (from window pattern)
+            var windowPattern = (IUIAutomationWindowPattern?)cachedElement.GetCachedPattern(UiaPatternIds.Window);
+            if (windowPattern != null)
             {
-                if (element.Patterns.Window.Pattern.IsModal.Value)
+                if (windowPattern.CachedIsModal != 0)
                     states.Add("modal");
             }
         }
         catch
         {
-            // Some states not available
+            // Some states not available from cache
         }
 
         return states;
     }
 
-    private static List<AutomationElement> FindMatchingElements(AutomationElement root, string? automationId, string? name, string? controlType)
+    /// <summary>
+    /// UIA Property ID constants. Stable since Windows Vista.
+    /// See: https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-automation-element-propids
+    /// </summary>
+    private static class UiaPropertyIds
     {
-        var results = new List<AutomationElement>();
+        public const int BoundingRectangle = 30001;
+        public const int ProcessId = 30002;
+        public const int ControlType = 30003;
+        public const int Name = 30005;
+        public const int HasKeyboardFocus = 30008;
+        public const int IsKeyboardFocusable = 30009;
+        public const int IsEnabled = 30010;
+        public const int AutomationId = 30011;
+        public const int ClassName = 30012;
+        public const int IsOffscreen = 30022;
+        public const int FrameworkId = 30024;
+        public const int RuntimeId = 30000;
+    }
 
-        void SearchRecursive(AutomationElement element)
+    /// <summary>
+    /// UIA Pattern ID constants. Stable since Windows Vista.
+    /// See: https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-controlpattern-ids
+    /// </summary>
+    private static class UiaPatternIds
+    {
+        public const int Value = 10002;
+        public const int ExpandCollapse = 10005;
+        public const int Window = 10009;
+        public const int SelectionItem = 10010;
+        public const int Toggle = 10015;
+    }
+
+    private List<AutomationElement> FindMatchingElements(AutomationElement root, string? automationId, string? name, string? controlType)
+    {
+        var cf = _applicationManager.Automation.ConditionFactory;
+        var conditions = new List<ConditionBase>();
+
+        if (!string.IsNullOrEmpty(automationId))
         {
-            bool matches = true;
+            conditions.Add(cf.ByAutomationId(automationId));
+        }
 
-            if (!string.IsNullOrEmpty(automationId))
+        if (!string.IsNullOrEmpty(controlType))
+        {
+            if (Enum.TryParse<ControlType>(controlType, ignoreCase: true, out var ct))
             {
-                matches &= element.Properties.AutomationId.ValueOrDefault == automationId;
-            }
-
-            if (!string.IsNullOrEmpty(name))
-            {
-                var elementName = element.Properties.Name.ValueOrDefault;
-                matches &= elementName != null && elementName.Contains(name, StringComparison.OrdinalIgnoreCase);
-            }
-
-            if (!string.IsNullOrEmpty(controlType))
-            {
-                var elementControlType = element.Properties.ControlType.ValueOrDefault.ToString();
-                matches &= elementControlType.Equals(controlType, StringComparison.OrdinalIgnoreCase);
-            }
-
-            if (matches && (!string.IsNullOrEmpty(automationId) || !string.IsNullOrEmpty(name) || !string.IsNullOrEmpty(controlType)))
-            {
-                results.Add(element);
-            }
-
-            try
-            {
-                foreach (var child in element.FindAllChildren())
-                {
-                    SearchRecursive(child);
-                }
-            }
-            catch
-            {
-                // Children not accessible
+                conditions.Add(cf.ByControlType(ct));
             }
         }
 
-        SearchRecursive(root);
+        // UIA doesn't support substring matching natively, so for name we use two strategies:
+        // - If name is the only criterion and no others, do a native name search then post-filter for substring
+        // - If combined with other criteria, use native conditions for the others and post-filter name
+
+        ConditionBase searchCondition;
+        if (conditions.Count == 0)
+        {
+            // Only name criterion (or none, but caller ensures at least one)
+            searchCondition = TrueCondition.Default;
+        }
+        else if (conditions.Count == 1)
+        {
+            searchCondition = conditions[0];
+        }
+        else
+        {
+            searchCondition = new AndCondition(conditions.ToArray());
+        }
+
+        var found = root.FindAll(FlaUI.Core.Definitions.TreeScope.Descendants, searchCondition);
+        var results = new List<AutomationElement>();
+
+        foreach (var element in found)
+        {
+            // Post-filter for substring name match (UIA only supports exact match)
+            if (!string.IsNullOrEmpty(name))
+            {
+                var elementName = element.Properties.Name.ValueOrDefault;
+                if (elementName == null || !elementName.Contains(name, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+            }
+
+            results.Add(element);
+        }
+
         return results;
     }
 

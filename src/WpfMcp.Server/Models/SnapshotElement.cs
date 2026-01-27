@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json.Serialization;
 
 namespace WpfMcp.Server.Models;
@@ -60,40 +61,44 @@ public sealed class SnapshotElement
     /// </summary>
     public string ToYamlString(int indentLevel = 0)
     {
-        var indent = new string(' ', indentLevel * 2);
-        var parts = new List<string>();
+        var sb = new StringBuilder();
+        WriteYaml(sb, indentLevel);
+        return sb.ToString();
+    }
 
-        // Build the main line: - controlType "name" [ref=eX] [states]
-        var line = $"{indent}- {ControlType}";
+    /// <summary>
+    /// Appends YAML representation to a StringBuilder for efficient tree serialization.
+    /// </summary>
+    public void WriteYaml(StringBuilder sb, int indentLevel = 0)
+    {
+        // Indent
+        for (int i = 0; i < indentLevel * 2; i++)
+            sb.Append(' ');
+
+        sb.Append("- ").Append(ControlType);
 
         if (!string.IsNullOrEmpty(Name))
         {
-            line += $" \"{Name}\"";
+            sb.Append(" \"").Append(Name).Append('"');
         }
 
-        line += $" [ref={Ref}]";
+        sb.Append(" [ref=").Append(Ref).Append(']');
 
-        // Add value if present
         if (!string.IsNullOrEmpty(Value))
         {
-            line += $" [value=\"{TruncateValue(Value)}\"]";
+            sb.Append(" [value=\"").Append(TruncateValue(Value)).Append("\"]");
         }
 
-        // Add states
         foreach (var state in States)
         {
-            line += $" [{state}]";
+            sb.Append(" [").Append(state).Append(']');
         }
 
-        parts.Add(line);
-
-        // Add children recursively
         foreach (var child in Children)
         {
-            parts.Add(child.ToYamlString(indentLevel + 1));
+            sb.AppendLine();
+            child.WriteYaml(sb, indentLevel + 1);
         }
-
-        return string.Join(Environment.NewLine, parts);
     }
 
     private static string TruncateValue(string value, int maxLength = 50)
@@ -124,5 +129,13 @@ public sealed class SnapshotResult
     /// YAML-formatted string representation for LLM consumption.
     /// </summary>
     [JsonPropertyName("yaml")]
-    public string Yaml => Tree.ToYamlString();
+    public string Yaml
+    {
+        get
+        {
+            var sb = new StringBuilder();
+            Tree.WriteYaml(sb);
+            return sb.ToString();
+        }
+    }
 }

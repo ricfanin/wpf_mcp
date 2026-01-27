@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "wpf-mcp": {
-      "command": "C:/Users/Riccardo/Documents/Coding/mcp/WPF-mcp/src/WpfMcp.Server/bin/Debug/net8.0-windows/win-x64/WpfMcp.Server.exe",
+      "command": "C:/Users/ricca/Documents/coding/wpf_mcp/src/WpfMcp.Server/bin/Debug/net8.0-windows/win-x64/WpfMcp.Server.exe",
       "args": []
     }
   }

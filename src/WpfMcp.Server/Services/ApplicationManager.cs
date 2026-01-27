@@ -1,7 +1,9 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using FlaUI.Core;
 using FlaUI.Core.AutomationElements;
 using FlaUI.UIA3;
+using WpfMcp.Server.Models;
 
 namespace WpfMcp.Server.Services;
 
@@ -14,11 +16,15 @@ public sealed class ApplicationManager : IApplicationManager, IDisposable
     private Application? _application;
     private Window? _mainWindow;
     private bool _disposed;
+    private readonly ConcurrentQueue<ConsoleMessage> _consoleBuffer = new();
+    private const int MaxBufferSize = 1000;
 
     public ApplicationManager()
     {
         _automation = new UIA3Automation();
     }
+
+    public UIA3Automation Automation => _automation;
 
     public bool IsAttached => _application != null && !HasApplicationCrashed();
 
@@ -41,7 +47,10 @@ public sealed class ApplicationManager : IApplicationManager, IDisposable
 
         var processStartInfo = new ProcessStartInfo(path)
         {
-            UseShellExecute = true
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = false
         };
 
         if (arguments != null)
@@ -49,7 +58,15 @@ public sealed class ApplicationManager : IApplicationManager, IDisposable
             processStartInfo.Arguments = string.Join(" ", arguments);
         }
 
-        _application = Application.Launch(processStartInfo);
+        var process = Process.Start(processStartInfo)
+            ?? throw new InvalidOperationException($"Failed to start process: {path}");
+
+        process.OutputDataReceived += (_, e) => { if (e.Data != null) EnqueueMessage("stdout", e.Data); };
+        process.ErrorDataReceived += (_, e) => { if (e.Data != null) EnqueueMessage("stderr", e.Data); };
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        _application = Application.Attach(process);
 
         // Wait for main window
         using var cts = new CancellationTokenSource(timeoutMs);
@@ -111,6 +128,7 @@ public sealed class ApplicationManager : IApplicationManager, IDisposable
         {
             _application = null;
             _mainWindow = null;
+            _consoleBuffer.Clear();
         }
     }
 
@@ -137,6 +155,33 @@ public sealed class ApplicationManager : IApplicationManager, IDisposable
         catch
         {
             return true;
+        }
+    }
+
+    public IReadOnlyList<ConsoleMessage> GetConsoleOutput(string? level = null, int? limit = null)
+    {
+        var messages = _consoleBuffer.ToArray().AsEnumerable();
+
+        if (!string.IsNullOrEmpty(level))
+        {
+            messages = messages.Where(m => string.Equals(m.Level, level, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (limit.HasValue && limit.Value > 0)
+        {
+            messages = messages.TakeLast(limit.Value);
+        }
+
+        return messages.ToList();
+    }
+
+    private void EnqueueMessage(string level, string text)
+    {
+        _consoleBuffer.Enqueue(new ConsoleMessage(level, text, DateTime.UtcNow));
+
+        while (_consoleBuffer.Count > MaxBufferSize)
+        {
+            _consoleBuffer.TryDequeue(out _);
         }
     }
 
