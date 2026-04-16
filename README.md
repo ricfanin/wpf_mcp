@@ -39,8 +39,8 @@ dotnet tool install --global WpfMcp.Server
 
 ```bash
 # Clone the repository
-git clone https://github.com/riccardo-larosa/WPF-mcp.git
-cd WPF-mcp
+git clone https://github.com/ricfanin/wpf_mcp.git
+cd wpf_mcp
 
 # Build the project
 dotnet build
